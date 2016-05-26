@@ -19,6 +19,7 @@ import com.google.common.base.Preconditions;
 import com.linkedin.pinot.core.common.Block;
 import com.linkedin.pinot.core.common.BlockMultiValIterator;
 import com.linkedin.pinot.core.common.BlockSingleValIterator;
+import com.linkedin.pinot.core.common.DataFetcher;
 import com.linkedin.pinot.core.common.DataSource;
 import com.linkedin.pinot.core.indexsegment.IndexSegment;
 import com.linkedin.pinot.core.operator.aggregation.ResultHolderFactory;
@@ -51,7 +52,7 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
     MAP_BASED
   }
 
-  private final String[] _groupByColumns;
+  private final int _numGroupByColumns;
 
   private final BlockSingleValIterator[] _singleValIterators;
   private final BlockMultiValIterator[] _multiValIterators;
@@ -77,29 +78,27 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
   /**
    * Constructor for the class. Initializes data members (reusable arrays).
    *
-   * @param indexSegment
+   * @param dataFetcher
    * @param groupByColumns
    * @param maxNumGroupKeys
    */
-  DefaultGroupKeyGenerator(IndexSegment indexSegment, String[] groupByColumns, int maxNumGroupKeys) {
-    _groupByColumns = groupByColumns;
+  DefaultGroupKeyGenerator(DataFetcher dataFetcher, String[] groupByColumns, int maxNumGroupKeys) {
+    _numGroupByColumns = groupByColumns.length;
+    _multiValueResulableArray = new int[_numGroupByColumns][];
 
-    int numGroupByColumns = groupByColumns.length;
-    _multiValueResulableArray = new int[numGroupByColumns][];
+    _singleValIterators = new BlockSingleValIterator[_numGroupByColumns];
+    _multiValIterators = new BlockMultiValIterator[_numGroupByColumns];
 
-    _singleValIterators = new BlockSingleValIterator[numGroupByColumns];
-    _multiValIterators = new BlockMultiValIterator[numGroupByColumns];
+    _dictionaries = new Dictionary[_numGroupByColumns];
+    _cardinalities = new int[_numGroupByColumns];
+    _isSingleValueGroupByColumn = new boolean[_numGroupByColumns];
 
-    _dictionaries = new Dictionary[numGroupByColumns];
-    _cardinalities = new int[numGroupByColumns];
-    _isSingleValueGroupByColumn = new boolean[numGroupByColumns];
-
-    for (int i = 0; i < numGroupByColumns; i++) {
-      DataSource dataSource = indexSegment.getDataSource(_groupByColumns[i]);
+    for (int i = 0; i < _numGroupByColumns; i++) {
+      DataSource dataSource = dataFetcher.getDataSourceForColumn(groupByColumns[i]);
 
       _dictionaries[i] = dataSource.getDictionary();
       _cardinalities[i] = dataSource.getDataSourceMetadata().cardinality();
-      _isSingleValueGroupByColumn[i] = (dataSource.getDataSourceMetadata().isSingleValue()) ? true : false;
+      _isSingleValueGroupByColumn[i] = dataSource.getDataSourceMetadata().isSingleValue();
 
       Block block = dataSource.nextBlock();
 
@@ -122,7 +121,7 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
       _groupKeyToId.defaultReturnValue(INVALID_ID);
     }
 
-    _reusableGroupByValuesArray = new int[numGroupByColumns];
+    _reusableGroupByValuesArray = new int[_numGroupByColumns];
   }
 
   /**
@@ -171,7 +170,7 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
    */
   @Override
   public int generateKeyForDocId(int docId) {
-    for (int i = 0; i < _groupByColumns.length; i++) {
+    for (int i = 0; i < _numGroupByColumns; i++) {
       if (_isSingleValueGroupByColumn[i]) {
         _singleValIterators[i].skipTo(docId);
         _reusableGroupByValuesArray[i] = _singleValIterators[i].nextIntVal();
@@ -187,14 +186,12 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
   /**
    * {@inheritDoc}
    * @param docIdSet
-   * @param startIndex
    * @param length
    * @param docIdToGroupKey
    */
   @Override
-  public void generateKeysForDocIdSet(int[] docIdSet, int startIndex, int length, int[] docIdToGroupKey) {
-    int endIndex = startIndex + length - 1;
-    for (int i = startIndex; i <= endIndex; ++i) {
+  public void generateKeysForDocIdSet(int[] docIdSet, int length, int[] docIdToGroupKey) {
+    for (int i = 0; i < length; i++) {
       int docId = docIdSet[i];
       docIdToGroupKey[i] = generateKeyForDocId(docId);
     }
@@ -211,7 +208,7 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
     List<Long> groupByKeys = new ArrayList<>();
     groupByKeys.add(0l);
 
-    for (int i = 0; i < _groupByColumns.length; i++) {
+    for (int i = 0; i < _numGroupByColumns; i++) {
       if (_isSingleValueGroupByColumn[i]) {
         BlockSingleValIterator blockValIterator = _singleValIterators[i];
         blockValIterator.skipTo(docId);
@@ -252,18 +249,14 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
 
   /**
    * Given a docIdSet, return a map containing array of group by keys for each docId.
-   * The key in the map returned is indexed from startIndex to startIndex + length.
    *
    * @param docIdSet
-   * @param startIndex
    * @param length
    * @return
    */
   @Override
-  public void generateKeysForDocIdSet(int[] docIdSet, int startIndex, int length, int[][] docIdToGroupKeys) {
-
-    int endIndex = startIndex + length - 1;
-    for (int i = startIndex; i <= endIndex; ++i) {
+  public void generateKeysForDocIdSet(int[] docIdSet, int length, int[][] docIdToGroupKeys) {
+    for (int i = 0; i < length; i++) {
       int docId = docIdSet[i];
 
       // Note this is key in the map is the index not docId.
@@ -282,7 +275,7 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
     decodeRawGroupKey(groupKey, _cardinalities, _reusableGroupByValuesArray);
 
     // Special case one group by column for performance.
-    if (_groupByColumns.length == 1) {
+    if (_numGroupByColumns == 1) {
       return _dictionaries[0].get(_reusableGroupByValuesArray[0]).toString();
     } else {
       StringBuilder builder = new StringBuilder();
@@ -340,7 +333,7 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
       Preconditions.checkState(rawKey < _uniqueGroupKeysFlag.length);
 
       int intRawKey = (int) rawKey;
-      if (_uniqueGroupKeysFlag[intRawKey] == false) {
+      if (!_uniqueGroupKeysFlag[intRawKey]) {
         _uniqueGroupKeysFlag[intRawKey] = true;
         _numUniqueGroupKeys++;
       }
@@ -364,24 +357,24 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
    * Inner class to implement group by key iterator for ARRAY_BASED storage.
    */
   private class ArrayBasedGroupKeyIterator implements Iterator<GroupKey> {
-    int index = 0;
+    int _index = 0;
     GroupKey _groupKey = new GroupKey(INVALID_ID, null);
 
     @Override
     public boolean hasNext() {
-      while (index < _uniqueGroupKeysFlag.length) {
-        if (_uniqueGroupKeysFlag[index]) {
+      while (_index < _uniqueGroupKeysFlag.length) {
+        if (_uniqueGroupKeysFlag[_index]) {
           return true;
         }
-        index++;
+        _index++;
       }
       return false;
     }
 
     @Override
     public GroupKey next() {
-      String stringGroupKey = dictIdToStringGroupKey(index);
-      _groupKey.setFirst(index++);
+      String stringGroupKey = dictIdToStringGroupKey(_index);
+      _groupKey.setFirst(_index++);
       _groupKey.setSecond(stringGroupKey);
       return _groupKey;
     }
@@ -413,8 +406,8 @@ public class DefaultGroupKeyGenerator implements GroupKeyGenerator {
     public GroupKey next() {
       Map.Entry<Long, Integer> entry = _iterator.next();
 
-      long groupKey = entry.getKey().longValue();
-      int groupId = entry.getValue().intValue();
+      long groupKey = entry.getKey();
+      int groupId = entry.getValue();
 
       String stringGroupKey = dictIdToStringGroupKey(groupKey);
       _groupKey.setFirst(groupId);

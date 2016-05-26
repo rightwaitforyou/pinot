@@ -120,7 +120,7 @@ public class DefaultAggregationExecutorTest {
   void testAggregation() {
     AggregationExecutor aggregationExecutor = new DefaultAggregationExecutor(_indexSegment, _aggregationInfoList);
     aggregationExecutor.init();
-    aggregationExecutor.aggregate(_docIdSet, 0, NUM_ROWS);
+    aggregationExecutor.aggregate(_docIdSet, NUM_ROWS);
     aggregationExecutor.finish();
 
     List<Serializable> result = aggregationExecutor.getResult();
